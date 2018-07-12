@@ -6,17 +6,18 @@ module mydata
     integer, parameter :: sp  = REAL32  !< single precision real (float)
     integer, parameter :: dp  = REAL64  !< double precision real (double)
     integer, parameter :: i4b = INT32   !< 4 byte integer (int)
+
+    integer(kind=i4b), parameter :: main_proc = 0 !this is the main process
     
     type(mpi_comm) :: my_world !global communicator
     type(mpi_comm) :: my_pool !master <-> workers communicator
     type(mpi_comm) :: master_pool !masters communicator
     integer(kind=i4b) :: my_rank
     integer(kind=i4b) :: my_master 
-    integer(kind=i4b), allocatable :: my_workers(:) !contains the ranks of the workers for the given master
+    integer(kind=i4b), allocatable :: my_workers(:) !ranks of the workers for the given master
     integer(kind=i4b) :: maxprocs
     integer(kind=i4b) :: nmasters
     integer(kind=i4b) :: nworkers
-    integer(kind=i4b), parameter :: main_proc = 0 !this is the main process
 
     integer(kind=i4b), parameter :: TAG_ANY = 10
     integer(kind=i4b), parameter :: TAG_FTYPE = 100
@@ -24,7 +25,8 @@ module mydata
     integer(kind=i4b), parameter :: TAG_OUDATA = 102
 
     contains
-    subroutine init_world(ierror)
+    !deprecated. don't use it.
+    subroutine init_world_(ierror)
     integer(kind=i4b), intent(out) :: ierror
 
     integer(kind=i4b), parameter :: strlen = 1024
@@ -66,10 +68,10 @@ module mydata
     read(value(1:valuelen), *)  nproc
     nmasters = nproc(1)
     nworkers = nproc(2) !the total number of workers
-    end subroutine init_world
+    end subroutine init_world_
 
 
-    subroutine create_pools(master)
+    subroutine create_pools_(master)
     logical, intent(in) :: master
 
     integer(kind=i4b) :: color
@@ -118,6 +120,8 @@ module mydata
         !write(*,*) my_rank, my_workers
 
         !The rank of this master in my_pool
+        !if everything went fine, the new rank
+        !should be equal to zero.
         call mpi_comm_rank(my_pool, new_rank)
 
         !Finally use sends to pass this information
@@ -125,7 +129,6 @@ module mydata
             irank = my_workers(iworker)
             call mpi_send(new_rank, 1, mpi_integer, irank, &
                           tag_any, my_world)
-
         enddo
 
         !reload my_workers with the ranks of the workers
@@ -179,5 +182,95 @@ module mydata
 
     call mpi_comm_rank(my_pool, new_rank)
     !write(*,'(A,I2,1x,A,I2)') 'oldrank=',my_rank,'new_rank=',new_rank
+    end subroutine create_pools_
+
+    subroutine init_world(master, ierror)
+    logical, intent(in) :: master
+    integer(kind=i4b), optional, intent(out) :: ierror
+
+    type(mpi_comm) :: tmp_comm
+    integer(kind=i4b) :: color
+
+    if (present(ierror)) ierror = 0 !not used
+
+    !Start the MPI library
+    call mpi_init()
+    my_world = mpi_comm_world
+
+    !total number of processors (masters + workers)
+    call mpi_comm_size(my_world, maxprocs)
+
+    !separate workers and masters into two groups
+    !use that to find the number of workers and masters
+    if (master) then
+        call mpi_comm_split(my_world, 1, 0, tmp_comm)
+        call mpi_comm_size(tmp_comm, nmasters)
+        nworkers = maxprocs - nmasters
+    else
+        call mpi_comm_split(my_world, 2, 0, tmp_comm)
+        call mpi_comm_size(tmp_comm, nworkers)
+        nmasters = maxprocs - nworkers
+    endif
+
+    !free the communicator
+    call mpi_comm_free(tmp_comm)
+    end subroutine init_world
+
+    subroutine create_pools(master)
+    logical, intent(in) :: master
+
+    integer(kind=i4b) :: color
+    integer(kind=i4b) :: irank
+    integer(kind=i4b) :: size_my_pool
+    integer(kind=i4b) :: size_my_workers
+    integer(kind=i4b) :: new_rank
+
+    type(mpi_status) :: my_status
+
+    !The code below works when we start the programs as
+    !mpirun -n NMASTERS master.out : -n MWORKERS worker.out
+    !In this case the ranks look like this
+    !|0,1,2,...,NMASTERS-1,NMASTERS,...,NMASTERS+NWORKERS-1|
+    !|----MASTERS---------|--------WORKERS-----------------|
+    !which means that we can use the function mod to split
+    !the processes into required groups
+
+    !get the rank in the global communicator
+    call mpi_comm_rank(my_world, my_rank)
+
+    !create the new master<->worker communicators
+    color = mod(my_rank, nmasters)
+    call mpi_comm_split(my_world, color, 0, my_pool)
+
+    !masters have zero ranks in my_pool
+    if(master) then
+        !find the size of the my_pool
+        call mpi_comm_size(my_pool, size_my_pool)
+
+        !keep the ranks of the workers in my_pool here
+        allocate(my_workers(size_my_pool - 1))
+        do irank=1, size(my_workers), 1
+            my_workers(irank) = irank
+        enddo
+        !write(*,*) my_rank, my_workers
+    endif
+
+    !the rank of the master is always zero
+    !For the masters that's the main process, for the
+    !workers that's their own master. Each master process has
+    !rank zero in its own communicator.
+    my_master = 0
+
+    !Create the communicator for the masters.
+    if (master) then
+        call mpi_comm_split(my_world, main_proc, 0, master_pool)
+    else
+        !For the workers the value of master_pool is MPI_COMM_NULL (opt out)
+        call mpi_comm_split(my_world, MPI_UNDEFINED, 0, master_pool)
+    endif
+
+    !call mpi_comm_rank(my_pool, new_rank)
+    !write(*,'(A,I2,1x,A,I2)') 'oldrank=',my_rank,'new_rank=',new_rank
     end subroutine create_pools
+
 end module mydata

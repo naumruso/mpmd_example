@@ -3,7 +3,6 @@ program main
     implicit none
 
     logical, parameter :: master = .true.
-    integer(kind=i4b) :: ierror
 
     integer(kind=i4b), allocatable :: x(:,:)
     integer(kind=i4b) :: n = 2
@@ -14,13 +13,12 @@ program main
 
     character(len=100) :: strformat
 
-    call init_world(ierror)
-    if (ierror .ne. 0) call mpi_finalize()
-
+    call init_world(master)
     call create_pools(master)
     write(strformat,'(A,I0,A)') '(A,I2,1x,A,',size(my_workers),'(I0,",",1x))'
     write(*,trim(strformat)) 'master(', my_rank, ') my_workers=', my_workers
 
+    !load test data
     allocate(x(n,m))
     do i=1, m, 1
         x(:,i) = i
@@ -29,14 +27,14 @@ program main
     !test subroutine
     call masterfunc(x, n, m, xsum, nxsum)
     if (my_rank .eq. main_proc) then
-        write(*,*) 'mfunc:my_rank=',my_rank,'xsum=',xsum(1),'sum(x)=',sum(x)
+        write(strformat, '(A)') '(A,I2,1x,A,I0,1x,A,I0)'
+        write(*,trim(strformat)) 'mfunc:my_rank=',my_rank,'xsum=',xsum(1),'sum(x)=',sum(x)
     endif
 
     !shutdown all workers
     call exitworkers()
 
-    !print some info
-    !write(output_unit, *) master, my_rank, my_master
+    !quit yourself
     call mpi_finalize()
 
     contains
@@ -79,8 +77,10 @@ program main
     !to the end of the input array
     if (sum(sizes) .lt. m) sizes(nmasters - 1) = m - (nmasters - 1)*p
 
-    !start the initial send
+    !send or receive the initial data
     if (my_rank .eq. main_proc) then
+        !Start the initial send from the main process to the other masters
+        !
         !I do blocking sends, but it is also
         !okay to do non-blocking sends. All
         !results should be completely the same, but
@@ -90,8 +90,8 @@ program main
                            irank, tag_ftype, master_pool)
         enddo
 
-        !the master process just doesn't copy the data into a
-        !temporary array, it sends the whole array
+        !the master process doesn't copy the data into a
+        !temporary array, it sends the whole array to its workers
         !xrecv = x(1:n,idx(my_rank):sizes(my_rank))
         !write(*,*) 'my_rank=',my_rank,'xrecv=',xrecv
         call workerfunc(x(1,idx(my_rank)), n, sizes(my_rank), xres, nxsum)
@@ -114,10 +114,12 @@ program main
     endif
     !write(*,*) 'my_rank=',my_rank,'xres=',xres
 
+    !synchronize all masters
+    call mpi_barrier(master_pool)
+
     !start post-processing of the results
     !Here we calculate the sum of the xres vectors
-    !element by element using mpi_reduce. I don't
-    !know how to do this in place.
+    !element by element using mpi_reduce.
     if (my_rank .eq. main_proc) then
         call mpi_reduce(xres, xsum, nxsum, mpi_integer, MPI_SUM, main_proc, master_pool)
     else
@@ -177,7 +179,7 @@ program main
         call mpi_send(x(1,itask), 2, mpi_integer, irank, tag_indata, my_pool)
         !write(*,'(A,I0,1x,A,I0)') 'my_rank=',my_rank,'data sent to ', irank
 
-        !request results using non-blocking receive request.
+        !request results using non-blocking receive.
         !Finished requests are processed below with mpi_waitany.
         call mpi_irecv(recvbuf, 1, mpi_integer, irank, tag_oudata,&
                       my_pool, my_requests(itask))

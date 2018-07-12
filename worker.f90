@@ -3,13 +3,12 @@ program main
     implicit none
 
     logical, parameter :: master = .false.
-    integer(kind=i4b) :: ierror
 
-    call init_world(ierror)
-    if (ierror .ne. 0) call mpi_finalize()
-
+    call init_world(master)
     call create_pools(master)
+
     call processdata()
+    
     call mpi_finalize()
 
     contains
